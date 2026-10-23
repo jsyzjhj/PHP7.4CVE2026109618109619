@@ -1,0 +1,82 @@
+name: Build PHP 7.4.33 VC15 x64
+on:
+  workflow_dispatch:
+
+env:
+  PHP_TAG: php-7.4.33
+  PHP_BRANCH: 7.4
+  VC_VERSION: vc15
+  ARCH: x64
+  SDK_REPO: https://github.com/php/php-sdk-binary-tools
+  SDK_DIR: C:\php-sdk
+  SRC_DIR: C:\php-sdk\buildtree\vc15\x64\php-src
+
+jobs:
+  build:
+    runs-on: windows-2019
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone php-sdk-binary-tools
+        run: git clone ${{ env.SDK_REPO }} ${{ env.SDK_DIR }}
+        shell: pwsh
+
+      - name: Prepare buildtree & checkout php-src
+        run: |
+          cd ${{ env.SDK_DIR }}
+          .\phpsdk-${{ env.VC_VERSION }}-${{ env.ARCH }}.bat -c "
+            phpsdk_buildtree php74build;
+            cd php74build\${{ env.VC_VERSION }}\${{ env.ARCH }};
+            git clone --depth=1 -b ${{ env.PHP_TAG }} https://github.com/php/php-src.git;
+          "
+        shell: cmd
+
+      - name: Fetch deps
+        run: |
+          cd ${{ env.SDK_DIR }}
+          .\phpsdk-${{ env.VC_VERSION }}-${{ env.ARCH }}.bat -c "
+            cd php74build\${{ env.VC_VERSION }}\${{ env.ARCH }}\php-src;
+            phpsdk_deps --update --branch ${{ env.PHP_BRANCH }};
+          "
+        shell: cmd
+
+      - name: Build TS
+        run: |
+          cd ${{ env.SDK_DIR }}
+          .\phpsdk-${{ env.VC_VERSION }}-${{ env.ARCH }}.bat -c "
+            cd php74build\${{ env.VC_VERSION }}\${{ env.ARCH }}\php-src;
+            buildconf;
+            configure --enable-cli --enable-cgi --enable-zip --enable-opcache --disable-all;
+            nmake;
+          "
+        shell: cmd
+
+      - name: Build NTS
+        run: |
+          cd ${{ env.SDK_DIR }}
+          .\phpsdk-${{ env.VC_VERSION }}-${{ env.ARCH }}.bat -c "
+            cd php74build\${{ env.VC_VERSION }}\${{ env.ARCH }}\php-src;
+            nmake clean;
+            buildconf;
+            configure --enable-cli --enable-cgi --enable-zip --enable-opcache --disable-all --disable-zts;
+            nmake;
+          "
+        shell: cmd
+
+      - name: Package
+        run: |
+          Compress-Archive -Path '${{ env.SRC_DIR }}\Release_TS\*' -DestinationPath php7.4.33-vc15-x64-ts.zip
+          Compress-Archive -Path '${{ env.SRC_DIR }}\Release\*' -DestinationPath php7.4.33-vc15-x64-nts.zip
+        shell: pwsh
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: php7.4.33-vc15
+          name: PHP 7.4.33 VC15 x64
+          files: |
+            php7.4.33-vc15-x64-ts.zip
+            php7.4.33-vc15-x64-nts.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
