@@ -1,157 +1,67 @@
-# Build PHP 7.4 (this repo) for Windows, vc15 (v141 / VS2017-equivalent) toolset
-# - Produces php.exe + php-cgi.exe + all extensions + DLLs
-# - vc15/v141 = the last toolchain whose binaries run on Windows 7
-# - GitHub Actions windows-2022 cannot install VS2017 (unsupported on Server 2022),
-#   so we install the v141 toolset component into the preinstalled VS2022 and
-#   enable it via "vcvarsall -vcvars_ver=14.16" -> cl.exe 14.16 (identical to VS2017).
-# - Uses the official PHP SDK (php-sdk-binary-tools, tag php-sdk-2.8.4)
-#   and official dependency packages (phpsdk_deps -s staging).
-#
-# Usage:
-#   1. Put this file in your repo: .github/workflows/build-php74-windows.yml
-#   2. Actions -> "Build PHP 7.4 Windows vc15" -> Run workflow
-#   3. Download artifact php74-vc15-x64.zip
-
-name: Build PHP 7.4 Windows vc15
+name: Build PHP 7.4 on Windows (VC15)
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ master ]
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: windows-2022
-    timeout-minutes: 180
-
+  build-windows:
+    runs-on: windows-2022 # Windows-2019 默认包含 VS2017 (VC15)，最适合 PHP 7.4
+    strategy:
+      matrix:
+        arch: [ x64 ] # 可选: x86, x64
+        ts: [ ts ]    # 可选: ts (Thread Safe), nts (Non-Thread Safe)
+    
     steps:
-      - name: Install v141 toolset into VS2022 (vc15)
-        shell: pwsh
-        run: |
-          $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'VS2022 not found on runner' }
-          Write-Host "Found VS2022 at: $vs"
-
-          $setup = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe'
-          $vlog = 'C:\vs2022-modify.log'
-          Write-Host 'Adding v141 (VS2017) toolset component to VS2022...'
-          $p = Start-Process -FilePath $setup -ArgumentList @(
-            'modify',
-            '--installPath', $vs,
-            '--add', 'Microsoft.VisualStudio.Component.VC.v141.x86.x64',
-            '--quiet', '--norestart',
-            '--log', $vlog
-          ) -Wait -PassThru
-          if ($p.ExitCode -ne 0) {
-            if (Test-Path $vlog) { Get-Content $vlog -Tail 50 -ErrorAction SilentlyContinue }
-            throw "VS2022 modify failed with exit code $($p.ExitCode)"
-          }
-
-          $msvc = Join-Path $vs 'VC\Tools\MSVC'
-          if (-not (Test-Path $msvc)) { throw 'MSVC tools dir missing after modify' }
-          $v141 = Get-ChildItem -Path $msvc -Directory -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -like '14.1*' } | Select-Object -First 1
-          if (-not $v141) {
-            Write-Host "Installed MSVC versions:"; Get-ChildItem $msvc -Directory | Select-Object -ExpandProperty Name
-            throw 'v141 toolset (14.1x) not found after modify'
-          }
-          Write-Host "v141 toolset ready: $($v141.FullName)"
-
-      - name: Checkout source
+      - name: Checkout PHP Source
         uses: actions/checkout@v4
         with:
-          path: src
+          fetch-depth: 0
+          # 假设你的仓库就是 php-src，或者你需要在这里 clone php-src
+          # 如果当前仓库不是 php-src，请取消下面注释并修改 url
+          # repository: php/php-src
+          # path: php-src
 
-      - name: Clone PHP SDK (official build tools, prebuilt binaries included)
+      - name: Setup PHP SDK Environment
+        uses: php/setup-php-sdk@v0.7
+        with:
+          version: '7.4'
+          arch: ${{ matrix.arch }}
+          ts: ${{ matrix.ts }}
+          # 关键：指定使用 VC15 (VS2017)
+          vs: '15' 
+
+      - name: Install Dependencies
         run: |
-          git clone --depth 1 --branch php-sdk-2.8.4 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
-          if (-not (Test-Path 'C:\php-sdk\phpsdk-starter.bat')) { throw 'php-sdk clone failed' }
+          # 进入源码目录
+          cd php-src
+          # 更新依赖库 (deps)
+          phpsdk_deps --update --branch PHP-7.4
 
-      - name: Prepare SDK tree, source and build task
-        shell: pwsh
+      - name: Buildconf
         run: |
-          $base = 'C:\php-sdk\php74\vc15\x64'
-          New-Item -ItemType Directory -Force (Join-Path $base 'deps')    | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $base 'php-src') | Out-Null
-          Copy-Item -Path "$env:GITHUB_WORKSPACE\src\*" -Destination (Join-Path $base 'php-src') -Recurse -Force
+          cd php-src
+          buildconf
 
-          $vs = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise'
-          if (-not (Test-Path $vs)) {
-            $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
-            $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          }
-
-          $task = @"
-          @echo off
-          set LOG=C:\php-sdk\build.log
-          call "$vs\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.16
-          if errorlevel 1 exit /b 1
-          set PATH=C:\php-sdk\bin;C:\php-sdk\msys2\usr\bin;%PATH%
-          set PHP_SDK_VC=vc15
-          set PHP_SDK_ARCH=x64
-          cd /d C:\php-sdk\php74\vc15\x64\php-src
-          echo === phpsdk_deps === >> %LOG% 2>&1
-          call phpsdk_deps -u -s staging >> %LOG% 2>&1
-          if errorlevel 1 exit /b 1
-          echo === buildconf === >> %LOG% 2>&1
-          call buildconf --force >> %LOG% 2>&1
-          if errorlevel 1 exit /b 1
-          echo === configure === >> %LOG% 2>&1
-          call configure --enable-snapshot-build >> %LOG% 2>&1
-          if errorlevel 1 exit /b 1
-          echo === jom === >> %LOG% 2>&1
-          jom >> %LOG% 2>&1
-          if errorlevel 1 exit /b 1
-          cd /d C:\
-          exit /b 0
-          "@
-          # batch files need CRLF; PowerShell 7 defaults to LF
-          $task = $task.Replace("`n", "`r`n")
-          [System.IO.File]::WriteAllText('C:\build-task.bat', $task)
-          Write-Host 'build-task.bat written'
-
-      - name: Build PHP 7.4 (deps + configure + jom, vc15/v141)
-        shell: cmd
+      - name: Configure
         run: |
-          call C:\build-task.bat
-          if errorlevel 1 (
-            echo ==== build.log tail ====
-            type C:\php-sdk\build.log
-            exit /b 1
-          )
-          if not exist C:\php-sdk\php74\vc15\x64\php-src\Release_TS\php.exe exit /b 1
+          cd php-src
+          # 配置编译选项，启用 CLI 和常用扩展
+          configure --enable-cli --enable-cgi --with-openssl --with-zlib --enable-mbstring --enable-pdo --with-pdo-sqlite --with-sqlite3 --enable-debug-pack=no
 
-      - name: Collect binaries
-        shell: pwsh
+      - name: Compile
         run: |
-          $rel = 'C:\php-sdk\php74\vc15\x64\php-src\Release_TS'
-          $out = 'C:\php74-vc15-x64'
-          New-Item -ItemType Directory -Force $out | Out-Null
+          cd php-src
+          nmake
 
-          # php.exe / php-cgi.exe / core DLL / ini templates
-          Copy-Item -Path (Join-Path $rel 'php.exe') -Destination $out -Force
-          Copy-Item -Path (Join-Path $rel 'php-cgi.exe') -Destination $out -Force
-          Copy-Item -Path (Join-Path $rel 'php7ts.dll') -Destination $out -Force
-          Copy-Item -Path (Join-Path $rel 'php.ini-development') -Destination $out -Force
-          Copy-Item -Path (Join-Path $rel 'php.ini-production') -Destination $out -Force
-          # all bundled dependency DLLs (libssl, libcrypto, libxml2, ...)
-          Copy-Item -Path (Join-Path $rel '*.dll') -Destination $out -Force
-          # extensions
-          if (Test-Path (Join-Path $rel 'ext')) {
-            Copy-Item -Path (Join-Path $rel 'ext') -Destination $out -Recurse -Force
-          }
-
-          $zip = 'C:\php74-vc15-x64.zip'
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path "$out\*" -DestinationPath $zip
-          Write-Host "php.exe size: $((Get-Item (Join-Path $out 'php.exe')).Length) bytes"
-          Write-Host "php-cgi.exe size: $((Get-Item (Join-Path $out 'php-cgi.exe')).Length) bytes"
-          Write-Host "artifact: $zip"
-
-      - name: Upload artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: php74-vc15-x64
-          path: C:\php74-vc15-x64.zip
-          if-no-files-found: error
+          name: php-7.4-${{ matrix.arch }}-${{ matrix.ts }}-vc15
+          path: |
+            php-src/x64/Release_TS/php.exe
+            php-src/x64/Release_TS/php-cgi.exe
+            php-src/x64/Release_TS/php7.dll
+            php-src/x64/Release_TS/ext/
+          retention-days: 5
