@@ -34,14 +34,19 @@ jobs:
           Write-Host "Found VS2022 at: $vs"
 
           $setup = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe'
+          $vlog = 'C:\vs2022-modify.log'
           Write-Host 'Adding v141 (VS2017) toolset component to VS2022...'
           $p = Start-Process -FilePath $setup -ArgumentList @(
             'modify',
             '--installPath', $vs,
             '--add', 'Microsoft.VisualStudio.Component.VC.v141.x86.x64',
-            '--quiet', '--norestart', '--wait'
+            '--quiet', '--norestart',
+            '--log', $vlog
           ) -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "VS2022 modify failed with exit code $($p.ExitCode)" }
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $vlog) { Get-Content $vlog -Tail 50 -ErrorAction SilentlyContinue }
+            throw "VS2022 modify failed with exit code $($p.ExitCode)"
+          }
 
           $msvc = Join-Path $vs 'VC\Tools\MSVC'
           if (-not (Test-Path $msvc)) { throw 'MSVC tools dir missing after modify' }
