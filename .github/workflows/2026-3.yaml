@@ -1,0 +1,143 @@
+# Build PHP 7.4 (this repo) for Windows, vc15 (VS2017 / v141) toolset
+# - Produces php.exe + php-cgi.exe + all extensions + DLLs
+# - vc15 = the last toolchain whose binaries run on Windows 7
+# - Uses the official PHP SDK (php-sdk-binary-tools, tag php-sdk-2.8.4)
+#   and official dependency packages (phpsdk_deps -s staging)
+#
+# Usage:
+#   1. Put this file in your repo: .github/workflows/build-php74-windows.yml
+#   2. Actions -> "Build PHP 7.4 Windows vc15" -> Run workflow
+#   3. Download artifact php74-vc15-x64.zip
+
+name: Build PHP 7.4 Windows vc15
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    steps:
+      - name: Install VS2017 Build Tools (v141 toolset for vc15)
+        shell: pwsh
+        run: |
+          $boot = Join-Path $env:TEMP 'vs_buildtools.exe'
+          Write-Host "Downloading VS2017 Build Tools bootstrap..."
+          Invoke-WebRequest -Uri 'https://aka.ms/vs/15/release/vs_buildtools.exe' -OutFile $boot
+          Write-Host "Installing VS2017 Build Tools (this takes a few minutes)..."
+          $p = Start-Process -FilePath $boot -ArgumentList @(
+            '--quiet', '--wait', '--norestart', '--nocache',
+            '--installPath', 'C:\BuildTools2017',
+            '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+            '--add', 'Microsoft.VisualStudio.Component.VC.v141.x86.x64',
+            '--add', 'Microsoft.VisualStudio.Component.Windows10SDK.17763',
+            '--log', 'C:\vs2017-install.log'
+          ) -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Get-Content 'C:\vs2017-install.log' -Tail 40 -ErrorAction SilentlyContinue
+            throw "VS2017 Build Tools install failed with exit code $($p.ExitCode)"
+          }
+          $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+          & $vswhere -products * -version '[14.10,14.20)' -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not (& $vswhere -products * -version '[14.10,14.20)' -property installationPath)) {
+            throw 'vswhere could not find a VS2017 (14.10-14.19) installation'
+          }
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Clone PHP SDK (official build tools, prebuilt binaries included)
+        run: |
+          git clone --depth 1 --branch php-sdk-2.8.4 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
+          if (-not (Test-Path 'C:\php-sdk\phpsdk-starter.bat')) { throw 'php-sdk clone failed' }
+
+      - name: Init SDK tree (phpsdk_buildtree php74)
+        shell: cmd
+        run: |
+          echo @echo off > C:\init-task.bat
+          echo cd /d C:\php-sdk >> C:\init-task.bat
+          echo call phpsdk_buildtree php74 >> C:\init-task.bat
+          echo exit /b %%ERRORLEVEL%% >> C:\init-task.bat
+          call C:\php-sdk\phpsdk-starter.bat -c vc15 -a x64 -t C:\init-task.bat
+          if not exist C:\php-sdk\php74\vc15\x64 exit /b 1
+
+      - name: Place source into SDK tree and write build task
+        shell: pwsh
+        run: |
+          $srcdir = 'C:\php-sdk\php74\vc15\x64\php-src'
+          New-Item -ItemType Directory -Force $srcdir | Out-Null
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\src\*" -Destination $srcdir -Recurse -Force
+
+          $task = @'
+          @echo off
+          set LOG=C:\php-sdk\build.log
+          pushd C:\php-sdk\php74\vc15\x64\php-src
+          echo === phpsdk_deps === >> %LOG% 2>&1
+          call phpsdk_deps -u -s staging >> %LOG% 2>&1
+          if errorlevel 1 exit /b 1
+          echo === buildconf === >> %LOG% 2>&1
+          call buildconf --force >> %LOG% 2>&1
+          if errorlevel 1 exit /b 1
+          echo === configure === >> %LOG% 2>&1
+          call configure --enable-snapshot-build >> %LOG% 2>&1
+          if errorlevel 1 exit /b 1
+          echo === nmake (jom) === >> %LOG% 2>&1
+          jom >> %LOG% 2>&1
+          if errorlevel 1 exit /b 1
+          popd
+          exit /b 0
+          '@
+          # batch files need CRLF; PowerShell 7 defaults to LF
+          $task = $task.Replace("`n", "`r`n")
+          [System.IO.File]::WriteAllText('C:\build-task.bat', $task)
+
+      - name: Build PHP 7.4 (deps + configure + nmake)
+        shell: cmd
+        run: |
+          call C:\php-sdk\phpsdk-starter.bat -c vc15 -a x64 -t C:\build-task.bat
+          if errorlevel 1 (
+            echo ==== build.log tail ====
+            type C:\php-sdk\build.log
+            exit /b 1
+          )
+          if not exist C:\php-sdk\php74\vc15\x64\php-src\Release_TS\php.exe exit /b 1
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $rel = 'C:\php-sdk\php74\vc15\x64\php-src\Release_TS'
+          $out = 'C:\php74-vc15-x64'
+          New-Item -ItemType Directory -Force $out | Out-Null
+
+          # php.exe / php-cgi.exe / core DLL / ini templates
+          Copy-Item -Path (Join-Path $rel 'php.exe') -Destination $out -Force
+          Copy-Item -Path (Join-Path $rel 'php-cgi.exe') -Destination $out -Force
+          Copy-Item -Path (Join-Path $rel 'php7ts.dll') -Destination $out -Force
+          Copy-Item -Path (Join-Path $rel 'php.ini-development') -Destination $out -Force
+          Copy-Item -Path (Join-Path $rel 'php.ini-production') -Destination $out -Force
+          # all bundled dependency DLLs (libssl, libcrypto, libxml2, ...)
+          Copy-Item -Path (Join-Path $rel '*.dll') -Destination $out -Force
+          # extensions
+          if (Test-Path (Join-Path $rel 'ext')) {
+            Copy-Item -Path (Join-Path $rel 'ext') -Destination $out -Recurse -Force
+          }
+
+          $zip = 'C:\php74-vc15-x64.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$out\*" -DestinationPath $zip
+          Write-Host "php.exe size: $((Get-Item (Join-Path $out 'php.exe')).Length) bytes"
+          Write-Host "php-cgi.exe size: $((Get-Item (Join-Path $out 'php-cgi.exe')).Length) bytes"
+          Write-Host "artifact: $zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php74-vc15-x64
+          path: C:\php74-vc15-x64.zip
+          if-no-files-found: error
