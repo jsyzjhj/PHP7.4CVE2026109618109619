@@ -1,8 +1,11 @@
-# Build PHP 7.4 (this repo) for Windows, vc15 (VS2017 / v141) toolset
+# Build PHP 7.4 (this repo) for Windows, vc15 (v141 / VS2017-equivalent) toolset
 # - Produces php.exe + php-cgi.exe + all extensions + DLLs
-# - vc15 = the last toolchain whose binaries run on Windows 7
+# - vc15/v141 = the last toolchain whose binaries run on Windows 7
+# - GitHub Actions windows-2022 cannot install VS2017 (unsupported on Server 2022),
+#   so we install the v141 toolset component into the preinstalled VS2022 and
+#   enable it via "vcvarsall -vcvars_ver=14.16" -> cl.exe 14.16 (identical to VS2017).
 # - Uses the official PHP SDK (php-sdk-binary-tools, tag php-sdk-2.8.4)
-#   and official dependency packages (phpsdk_deps -s staging)
+#   and official dependency packages (phpsdk_deps -s staging).
 #
 # Usage:
 #   1. Put this file in your repo: .github/workflows/build-php74-windows.yml
@@ -22,30 +25,33 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Install VS2017 Build Tools (v141 toolset for vc15)
+      - name: Install v141 toolset into VS2022 (vc15)
         shell: pwsh
         run: |
-          $boot = Join-Path $env:TEMP 'vs_buildtools.exe'
-          Write-Host "Downloading VS2017 Build Tools bootstrap..."
-          Invoke-WebRequest -Uri 'https://aka.ms/vs/15/release/vs_buildtools.exe' -OutFile $boot
-          Write-Host "Installing VS2017 Build Tools (this takes a few minutes)..."
-          $p = Start-Process -FilePath $boot -ArgumentList @(
-            '--quiet', '--wait', '--norestart', '--nocache',
-            '--installPath', 'C:\BuildTools2017',
-            '--add', 'Microsoft.VisualStudio.Workload.VCTools',
-            '--add', 'Microsoft.VisualStudio.Component.VC.v141.x86.x64',
-            '--add', 'Microsoft.VisualStudio.Component.Windows10SDK.17763',
-            '--log', 'C:\vs2017-install.log'
-          ) -Wait -PassThru
-          if ($p.ExitCode -ne 0) {
-            Get-Content 'C:\vs2017-install.log' -Tail 40 -ErrorAction SilentlyContinue
-            throw "VS2017 Build Tools install failed with exit code $($p.ExitCode)"
-          }
           $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
-          & $vswhere -products * -version '[14.10,14.20)' -property installationPath
-          if ($LASTEXITCODE -ne 0 -or -not (& $vswhere -products * -version '[14.10,14.20)' -property installationPath)) {
-            throw 'vswhere could not find a VS2017 (14.10-14.19) installation'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'VS2022 not found on runner' }
+          Write-Host "Found VS2022 at: $vs"
+
+          $setup = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe'
+          Write-Host 'Adding v141 (VS2017) toolset component to VS2022...'
+          $p = Start-Process -FilePath $setup -ArgumentList @(
+            'modify',
+            '--installPath', $vs,
+            '--add', 'Microsoft.VisualStudio.Component.VC.v141.x86.x64',
+            '--quiet', '--norestart', '--wait'
+          ) -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "VS2022 modify failed with exit code $($p.ExitCode)" }
+
+          $msvc = Join-Path $vs 'VC\Tools\MSVC'
+          if (-not (Test-Path $msvc)) { throw 'MSVC tools dir missing after modify' }
+          $v141 = Get-ChildItem -Path $msvc -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -like '14.1*' } | Select-Object -First 1
+          if (-not $v141) {
+            Write-Host "Installed MSVC versions:"; Get-ChildItem $msvc -Directory | Select-Object -ExpandProperty Name
+            throw 'v141 toolset (14.1x) not found after modify'
           }
+          Write-Host "v141 toolset ready: $($v141.FullName)"
 
       - name: Checkout source
         uses: actions/checkout@v4
@@ -57,27 +63,29 @@ jobs:
           git clone --depth 1 --branch php-sdk-2.8.4 https://github.com/php/php-sdk-binary-tools.git C:\php-sdk
           if (-not (Test-Path 'C:\php-sdk\phpsdk-starter.bat')) { throw 'php-sdk clone failed' }
 
-      - name: Init SDK tree (phpsdk_buildtree php74)
-        shell: cmd
-        run: |
-          echo @echo off > C:\init-task.bat
-          echo cd /d C:\php-sdk >> C:\init-task.bat
-          echo call phpsdk_buildtree php74 >> C:\init-task.bat
-          echo exit /b %%ERRORLEVEL%% >> C:\init-task.bat
-          call C:\php-sdk\phpsdk-starter.bat -c vc15 -a x64 -t C:\init-task.bat
-          if not exist C:\php-sdk\php74\vc15\x64 exit /b 1
-
-      - name: Place source into SDK tree and write build task
+      - name: Prepare SDK tree, source and build task
         shell: pwsh
         run: |
-          $srcdir = 'C:\php-sdk\php74\vc15\x64\php-src'
-          New-Item -ItemType Directory -Force $srcdir | Out-Null
-          Copy-Item -Path "$env:GITHUB_WORKSPACE\src\*" -Destination $srcdir -Recurse -Force
+          $base = 'C:\php-sdk\php74\vc15\x64'
+          New-Item -ItemType Directory -Force (Join-Path $base 'deps')    | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $base 'php-src') | Out-Null
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\src\*" -Destination (Join-Path $base 'php-src') -Recurse -Force
 
-          $task = @'
+          $vs = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise'
+          if (-not (Test-Path $vs)) {
+            $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+            $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          }
+
+          $task = @"
           @echo off
           set LOG=C:\php-sdk\build.log
-          pushd C:\php-sdk\php74\vc15\x64\php-src
+          call "$vs\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.16
+          if errorlevel 1 exit /b 1
+          set PATH=C:\php-sdk\bin;C:\php-sdk\msys2\usr\bin;%PATH%
+          set PHP_SDK_VC=vc15
+          set PHP_SDK_ARCH=x64
+          cd /d C:\php-sdk\php74\vc15\x64\php-src
           echo === phpsdk_deps === >> %LOG% 2>&1
           call phpsdk_deps -u -s staging >> %LOG% 2>&1
           if errorlevel 1 exit /b 1
@@ -87,20 +95,21 @@ jobs:
           echo === configure === >> %LOG% 2>&1
           call configure --enable-snapshot-build >> %LOG% 2>&1
           if errorlevel 1 exit /b 1
-          echo === nmake (jom) === >> %LOG% 2>&1
+          echo === jom === >> %LOG% 2>&1
           jom >> %LOG% 2>&1
           if errorlevel 1 exit /b 1
-          popd
+          cd /d C:\
           exit /b 0
-          '@
+          "@
           # batch files need CRLF; PowerShell 7 defaults to LF
           $task = $task.Replace("`n", "`r`n")
           [System.IO.File]::WriteAllText('C:\build-task.bat', $task)
+          Write-Host 'build-task.bat written'
 
-      - name: Build PHP 7.4 (deps + configure + nmake)
+      - name: Build PHP 7.4 (deps + configure + jom, vc15/v141)
         shell: cmd
         run: |
-          call C:\php-sdk\phpsdk-starter.bat -c vc15 -a x64 -t C:\build-task.bat
+          call C:\build-task.bat
           if errorlevel 1 (
             echo ==== build.log tail ====
             type C:\php-sdk\build.log
