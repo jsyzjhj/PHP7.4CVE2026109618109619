@@ -1,4 +1,4 @@
-name: Build PHP 7.4.33 VC15 x64
+name: Build PHP 7.4.33 VC15 x64-PHP7.4CVE2026109618109619
 on:
   workflow_dispatch:
 
