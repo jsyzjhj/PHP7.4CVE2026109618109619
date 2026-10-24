@@ -34,13 +34,4 @@ jobs:
           vs: '15'
           # 可选：添加额外的 configure 参数，例如启用特定扩展
           # configure-args: '--enable-cli --enable-cgi --with-openssl --with-zlib'
-      
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: php-${{ matrix.php-version }}-${{ matrix.arch }}-${{ matrix.ts }}-vc15
-          path: |
-            php-sdk/phpdev/vc15/${{ matrix.arch }}/php-${{ matrix.php-version }}/Release${{ matrix.ts == 'ts' && '_TS' || '' }}/*.exe
-            php-sdk/phpdev/vc15/${{ matrix.arch }}/php-${{ matrix.php-version }}/Release${{ matrix.ts == 'ts' && '_TS' || '' }}/*.dll
-            php-sdk/phpdev/vc15/${{ matrix.arch }}/php-${{ matrix.php-version }}/Release${{ matrix.ts == 'ts' && '_TS' || '' }}/ext/
-          retention-days: 5
+
