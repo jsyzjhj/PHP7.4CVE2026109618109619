@@ -1,67 +1,46 @@
-name: Build PHP 7.4 on Windows (VC15)
+
+name: Build PHP on Windows (VC15)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build-windows:
-    runs-on: windows-2022 # Windows-2019 默认包含 VS2017 (VC15)，最适合 PHP 7.4
-    strategy:
-      matrix:
-        arch: [ x64 ] # 可选: x86, x64
-        ts: [ ts ]    # 可选: ts (Thread Safe), nts (Non-Thread Safe)
+  build:
+    name: Build PHP ${{ matrix.php-version }} (${{ matrix.arch }}, ${{ matrix.ts }})
+    runs-on: windows-2022 # Windows-2019 原生支持 VS2017 (VC15)
     
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['7.4'] # 根据你的Fork分支调整，VC15主要支持PHP 7.2-7.4
+        arch: [x64]          # 可选: x86, x64
+        ts: [nts]            # 可选: ts (Thread Safe), nts (Non-Thread Safe)
+
     steps:
-      - name: Checkout PHP Source
+      - name: Checkout source code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # 假设你的仓库就是 php-src，或者你需要在这里 clone php-src
-          # 如果当前仓库不是 php-src，请取消下面注释并修改 url
-          # repository: php/php-src
-          # path: php-src
 
-      - name: Setup PHP SDK Environment
-        uses: php/setup-php-sdk@v0.7
+      - name: Build PHP
+        uses: php/php-windows-builder/php@v1
         with:
-          version: '7.4'
+          php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
           ts: ${{ matrix.ts }}
-          # 关键：指定使用 VC15 (VS2017)
-          vs: '15' 
-
-      - name: Install Dependencies
-        run: |
-          # 进入源码目录
-          cd php-src
-          # 更新依赖库 (deps)
-          phpsdk_deps --update --branch PHP-7.4
-
-      - name: Buildconf
-        run: |
-          cd php-src
-          buildconf
-
-      - name: Configure
-        run: |
-          cd php-src
-          # 配置编译选项，启用 CLI 和常用扩展
-          configure --enable-cli --enable-cgi --with-openssl --with-zlib --enable-mbstring --enable-pdo --with-pdo-sqlite --with-sqlite3 --enable-debug-pack=no
-
-      - name: Compile
-        run: |
-          cd php-src
-          nmake
-
-      - name: Upload Artifacts
+          # 关键：指定使用 VC15 (VS2017) 工具链
+          vs: '15'
+          # 可选：添加额外的 configure 参数，例如启用特定扩展
+          # configure-args: '--enable-cli --enable-cgi --with-openssl --with-zlib'
+      
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: php-7.4-${{ matrix.arch }}-${{ matrix.ts }}-vc15
+          name: php-${{ matrix.php-version }}-${{ matrix.arch }}-${{ matrix.ts }}-vc15
           path: |
-            php-src/x64/Release_TS/php.exe
-            php-src/x64/Release_TS/php-cgi.exe
-            php-src/x64/Release_TS/php7.dll
-            php-src/x64/Release_TS/ext/
+            php-sdk/phpdev/vc15/${{ matrix.arch }}/php-${{ matrix.php-version }}/Release${{ matrix.ts == 'ts' && '_TS' || '' }}/*.exe
+            php-sdk/phpdev/vc15/${{ matrix.arch }}/php-${{ matrix.php-version }}/Release${{ matrix.ts == 'ts' && '_TS' || '' }}/*.dll
+            php-sdk/phpdev/vc15/${{ matrix.arch }}/php-${{ matrix.php-version }}/Release${{ matrix.ts == 'ts' && '_TS' || '' }}/ext/
           retention-days: 5
